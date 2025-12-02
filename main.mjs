@@ -1,10 +1,7 @@
 import puppeteer from 'puppeteer'
 import { setTimeout } from 'node:timers/promises'
 
-// --- 1. 浏览器启动配置 ---
-
 const args = ['--no-sandbox', '--disable-setuid-sandbox']
-
 if (process.env.PROXY_SERVER) {
     const proxy_url = new URL(process.env.PROXY_SERVER)
     proxy_url.username = ''
@@ -13,106 +10,119 @@ if (process.env.PROXY_SERVER) {
 }
 
 const browser = await puppeteer.launch({
-    defaultViewport: { width: 1080, height: 1024 },
+    defaultViewport: { width: 1280, height: 1024 }, // 稍微加大窗口，防止布局挤压
     args,
 })
 
 const [page] = await browser.pages()
 const userAgent = await browser.userAgent()
 await page.setUserAgent(userAgent.replace('Headless', ''))
-
 const recorder = await page.screencast({ path: 'recording.webm' })
 
 try {
-    // --- 2. 代理认证 ---
     if (process.env.PROXY_SERVER) {
         const { username, password } = new URL(process.env.PROXY_SERVER)
-        if (username && password) {
-            await page.authenticate({ username, password })
-        }
+        if (username && password) await page.authenticate({ username, password })
     }
 
-    // ==========================================
-    // ▼▼▼ 核心业务逻辑 ▼▼▼
-    // ==========================================
-
-    console.log('1. 正在访问登录页面...')
-    await page.goto('https://svortex.ru/login', { 
-        waitUntil: 'networkidle2',
-        timeout: 60000 
-    })
-
-    console.log('2. 正在输入账号密码...')
+    console.log('1. 登录中...')
+    await page.goto('https://svortex.ru/login', { waitUntil: 'networkidle2', timeout: 60000 })
     
     await page.waitForSelector('input#username')
-    await page.locator('input#username').fill(process.env.EMAIL) 
-    
-    await page.waitForSelector('input#password')
-    await page.locator('input#password').fill(process.env.PASSWORD)
-
-    console.log('3. 点击登录并等待跳转...')
+    await page.type('input#username', process.env.EMAIL)
+    await page.type('input#password', process.env.PASSWORD) // 使用 type 代替 fill 兼容性更好
     
     await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2' }), 
-        page.locator('button.btn-primary').click()             
+        page.waitForNavigation({ waitUntil: 'networkidle2' }),
+        page.click('button.btn-primary')
     ])
+    console.log('2. 登录成功')
 
-    console.log('4. 登录成功，正在寻找目标按钮...')
-    
-    // --- 步骤 A: 点击蓝色按钮 ---
-    const targetSelector = 'button.bg-blue-600:nth-child(2)'
-    
-    // 等待按钮出现
-    await page.waitForSelector(targetSelector, { timeout: 15000 })
-    
-    console.log('找到蓝色按钮，执行点击...')
-    await page.locator(targetSelector).click()
-    
-    // 【关键修改】点击后强制等待 2 秒，给页面反应的时间
-    console.log('等待弹窗/页面加载...')
-    await setTimeout(2000)
-
-    // --- 步骤 B: 处理下拉框 (Select) ---
-    console.log('5. 正在寻找下拉框并自动选择第一个有效订单...')
-    
-    // 【关键修改】去掉了 fragile 的 "div:nth-child(1) >"，直接找 select
-    const selectSelector = 'select.wemx-form-control'
-
-    // 1. 等待下拉框加载出来
-    await page.waitForSelector(selectSelector, { timeout: 15000 })
-
-    // 2. 动态获取下拉框里第2个选项的值
-    const valueToSelect = await page.evaluate((selector) => {
-        const el = document.querySelector(selector)
-        // 确保元素存在且至少有2个选项 (下标0是提示，下标1是我们要的)
-        if (el && el.options.length > 1) {
-            return el.options[1].value 
+    // --- 关键步骤：点击蓝色按钮 ---
+    const btnSelector = 'button.bg-blue-600:nth-child(2)'
+    try {
+        await page.waitForSelector(btnSelector, { timeout: 10000 })
+        console.log('-> 找到蓝色按钮，准备点击...')
+        // 强制多等一下，防止页面JS没挂载好
+        await setTimeout(2000) 
+        await page.click(btnSelector)
+        console.log('-> 按钮已点击')
+    } catch (err) {
+        console.error('!!! 警告：没找到指定的蓝色按钮，尝试寻找页面上所有蓝色按钮...')
+        // 备用方案：点击页面上看到的第一个包含 "bg-blue-600" 的按钮
+        const buttons = await page.$$('button.bg-blue-600')
+        if (buttons.length > 0) {
+            console.log(`-> 发现 ${buttons.length} 个蓝色按钮，点击第 2 个（索引1）...`)
+            if (buttons[1]) await buttons[1].click()
+            else await buttons[0].click()
+        } else {
+            throw new Error('页面上找不到任何蓝色按钮！')
         }
-        return null
-    }, selectSelector)
-
-    if (valueToSelect) {
-        console.log(`-> 识别到目标订单 Value 为: "${valueToSelect}"，正在选中...`)
-        // 3. 使用 puppeteer 的 select 方法直接选中
-        await page.select(selectSelector, valueToSelect)
-    } else {
-        console.error('未找到可用的订单选项（列表可能为空）')
-        throw new Error('Dropdown option not found')
     }
-    
-    console.log('操作完成！')
 
-    // ==========================================
-    // ▲▲▲ 业务逻辑结束 ▲▲▲
-    // ==========================================
+    console.log('3. 等待弹窗加载 (5秒)...')
+    await setTimeout(5000) // 给足时间让弹窗出来
+
+    // --- 关键步骤：智能查找下拉框 ---
+    console.log('4. 正在全页面扫描下拉框...')
+
+    // 不通过 class 找，而是通过内容找
+    const targetSelectDetails = await page.evaluate(() => {
+        // 获取所有 select 标签
+        const selects = Array.from(document.querySelectorAll('select'));
+        
+        // 遍历每一个 select，看它的选项里有没有我们要的关键词
+        for (const select of selects) {
+            // 这里的关键词 'svortex' 来自你提供的 html
+            // 如果你的订单号变了，但都包含 svortex，这里就能匹配上
+            if (select.innerHTML.includes('svortex') || select.innerHTML.includes('1873')) {
+                
+                // 找到了！记录它的特征以便 puppeteer 操作
+                // 如果它没有 ID 或 Class，我们就给它加一个临时 ID
+                if (!select.id) select.id = 'found-by-script-' + Math.random().toString(36).substr(2, 9);
+                
+                // 获取第二个选项的值
+                let targetValue = '';
+                if (select.options.length > 1) {
+                    targetValue = select.options[1].value;
+                }
+                
+                return { found: true, id: select.id, value: targetValue };
+            }
+        }
+        return { found: false };
+    });
+
+    if (targetSelectDetails.found) {
+        console.log(`-> 成功定位到下拉框 (ID: ${targetSelectDetails.id})`)
+        console.log(`-> 目标值: ${targetSelectDetails.value}`)
+        
+        if (targetSelectDetails.value) {
+            await page.select(`select#${targetSelectDetails.id}`, targetSelectDetails.value)
+            console.log('-> 下拉框选择成功！')
+        } else {
+            console.error('-> 下拉框找到了，但里面没有足够的选项！')
+        }
+    } else {
+        console.error('!!! 错误：扫描了整个页面，没有找到包含 "svortex" 或 "1873" 的下拉框。')
+        
+        // --- 调试信息：打印页面结构 ---
+        console.log('--- 页面当前HTML结构 (前1000字符) ---')
+        const bodyHTML = await page.evaluate(() => document.body.innerHTML.substring(0, 1000));
+        console.log(bodyHTML)
+        console.log('-------------------------------------')
+        
+        throw new Error('无法找到目标下拉框，请检查截图 error.png 确认弹窗是否已打开。')
+    }
+
+    console.log('脚本执行完毕')
 
 } catch (e) {
     console.error('发生错误:', e)
-    await page.screenshot({ path: 'error.png' })
+    await page.screenshot({ path: 'error.png', fullPage: true })
     process.exitCode = 1
 } finally {
-    console.log('脚本即将关闭...')
-    await setTimeout(5000) 
+    await setTimeout(2000)
     await recorder.stop()
     await browser.close()
 }

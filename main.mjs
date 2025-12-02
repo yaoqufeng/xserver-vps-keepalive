@@ -9,7 +9,6 @@ if (process.env.PROXY_SERVER) {
     const proxy_url = new URL(process.env.PROXY_SERVER)
     proxy_url.username = ''
     proxy_url.password = ''
-    // 修复了正则替换的语法
     args.push(`--proxy-server=${proxy_url}`.replace(/\/$/, ''))
 }
 
@@ -25,7 +24,7 @@ await page.setUserAgent(userAgent.replace('Headless', ''))
 const recorder = await page.screencast({ path: 'recording.webm' })
 
 try {
-    // --- 2. 代理认证 (如果有配置) ---
+    // --- 2. 代理认证 ---
     if (process.env.PROXY_SERVER) {
         const { username, password } = new URL(process.env.PROXY_SERVER)
         if (username && password) {
@@ -69,22 +68,25 @@ try {
     console.log('找到蓝色按钮，执行点击...')
     await page.locator(targetSelector).click()
     
+    // 【关键修改】点击后强制等待 2 秒，给页面反应的时间
+    console.log('等待弹窗/页面加载...')
+    await setTimeout(2000)
+
     // --- 步骤 B: 处理下拉框 (Select) ---
     console.log('5. 正在寻找下拉框并自动选择第一个有效订单...')
     
-    // 使用精确的选择器定位那个 <select> 元素
-    // 这里结合了你给的结构：它是某个 div 下的第一个孩子，且类名为 wemx-form-control
-    const selectSelector = 'div:nth-child(1) > select.wemx-form-control'
+    // 【关键修改】去掉了 fragile 的 "div:nth-child(1) >"，直接找 select
+    const selectSelector = 'select.wemx-form-control'
 
     // 1. 等待下拉框加载出来
     await page.waitForSelector(selectSelector, { timeout: 15000 })
 
-    // 2. 动态获取下拉框里第2个选项的值 (跳过第1个 "选择订单" 的提示项)
+    // 2. 动态获取下拉框里第2个选项的值
     const valueToSelect = await page.evaluate((selector) => {
         const el = document.querySelector(selector)
         // 确保元素存在且至少有2个选项 (下标0是提示，下标1是我们要的)
         if (el && el.options.length > 1) {
-            return el.options[1].value // 获取 value="1873" 或其他动态值
+            return el.options[1].value 
         }
         return null
     }, selectSelector)
@@ -106,7 +108,6 @@ try {
 
 } catch (e) {
     console.error('发生错误:', e)
-    // 截图保存错误现场
     await page.screenshot({ path: 'error.png' })
     process.exitCode = 1
 } finally {

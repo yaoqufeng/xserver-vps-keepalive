@@ -61,10 +61,10 @@ try {
     const targetSelector = 'button.bg-blue-600:nth-child(2)'
     
     // 先等待该按钮出现在页面上 (设置 15秒超时)
-    // await page.waitForSelector(targetSelector, { timeout: 15000 })
+    await page.waitForSelector(targetSelector, { timeout: 15000 })
     
     // console.log('找到按钮，执行点击...')
-    // await page.locator(targetSelector).click()
+    await page.locator(targetSelector).click()
     
     console.log('操作完成！')
 

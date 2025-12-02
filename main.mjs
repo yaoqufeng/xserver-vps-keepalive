@@ -10,16 +10,21 @@ if (process.env.PROXY_SERVER) {
 }
 
 const browser = await puppeteer.launch({
-    defaultViewport: { width: 1280, height: 1024 }, // 稍微加大窗口，防止布局挤压
+    defaultViewport: { width: 1440, height: 900 }, // 使用桌面分辨率，防止布局变手机版
     args,
 })
 
 const [page] = await browser.pages()
 const userAgent = await browser.userAgent()
 await page.setUserAgent(userAgent.replace('Headless', ''))
+
+// 开启日志以便调试
+page.on('console', msg => console.log('PAGE LOG:', msg.text()));
+
 const recorder = await page.screencast({ path: 'recording.webm' })
 
 try {
+    // --- 登录部分 ---
     if (process.env.PROXY_SERVER) {
         const { username, password } = new URL(process.env.PROXY_SERVER)
         if (username && password) await page.authenticate({ username, password })
@@ -30,92 +35,99 @@ try {
     
     await page.waitForSelector('input#username')
     await page.type('input#username', process.env.EMAIL)
-    await page.type('input#password', process.env.PASSWORD) // 使用 type 代替 fill 兼容性更好
+    await page.type('input#password', process.env.PASSWORD)
     
     await Promise.all([
         page.waitForNavigation({ waitUntil: 'networkidle2' }),
         page.click('button.btn-primary')
     ])
-    console.log('2. 登录成功')
+    console.log('2. 登录成功，等待页面完全加载...')
+    
+    // 给点时间让 Dashboard 数据加载出来（有时候列表是异步加载的）
+    await setTimeout(5000)
 
-    // --- 关键步骤：点击蓝色按钮 ---
-    const btnSelector = 'button.bg-blue-600:nth-child(2)'
-    try {
-        await page.waitForSelector(btnSelector, { timeout: 10000 })
-        console.log('-> 找到蓝色按钮，准备点击...')
-        // 强制多等一下，防止页面JS没挂载好
-        await setTimeout(2000) 
-        await page.click(btnSelector)
-        console.log('-> 按钮已点击')
-    } catch (err) {
-        console.error('!!! 警告：没找到指定的蓝色按钮，尝试寻找页面上所有蓝色按钮...')
-        // 备用方案：点击页面上看到的第一个包含 "bg-blue-600" 的按钮
-        const buttons = await page.$$('button.bg-blue-600')
-        if (buttons.length > 0) {
-            console.log(`-> 发现 ${buttons.length} 个蓝色按钮，点击第 2 个（索引1）...`)
-            if (buttons[1]) await buttons[1].click()
-            else await buttons[0].click()
-        } else {
-            throw new Error('页面上找不到任何蓝色按钮！')
-        }
+    // ==========================================
+    // ▼▼▼ 核心修改：智能查找并点击按钮 ▼▼▼
+    // ==========================================
+    console.log('3. 正在寻找蓝色按钮...')
+
+    // 1. 找到页面上所有蓝色按钮
+    const blueButtons = await page.$$('button.bg-blue-600, a.bg-blue-600') // 同时找 button 和 a 标签
+
+    if (blueButtons.length === 0) {
+        throw new Error('页面上居然没有找到任何蓝色按钮！可能页面结构变了。')
     }
 
-    console.log('3. 等待弹窗加载 (5秒)...')
-    await setTimeout(5000) // 给足时间让弹窗出来
+    console.log(`-> 找到了 ${blueButtons.length} 个蓝色按钮，正在分析...`)
 
-    // --- 关键步骤：智能查找下拉框 ---
-    console.log('4. 正在全页面扫描下拉框...')
+    let targetBtnIndex = -1;
 
-    // 不通过 class 找，而是通过内容找
-    const targetSelectDetails = await page.evaluate(() => {
-        // 获取所有 select 标签
-        const selects = Array.from(document.querySelectorAll('select'));
+    // 2. 遍历打印它们的文字，帮你确认脚本到底想点谁
+    for (let i = 0; i < blueButtons.length; i++) {
+        // 获取按钮文字
+        const text = await page.evaluate(el => el.innerText.trim(), blueButtons[i]);
+        // 检查是否可见
+        const isVisible = await blueButtons[i].boundingBox() !== null;
         
-        // 遍历每一个 select，看它的选项里有没有我们要的关键词
-        for (const select of selects) {
-            // 这里的关键词 'svortex' 来自你提供的 html
-            // 如果你的订单号变了，但都包含 svortex，这里就能匹配上
-            if (select.innerHTML.includes('svortex') || select.innerHTML.includes('1873')) {
-                
-                // 找到了！记录它的特征以便 puppeteer 操作
-                // 如果它没有 ID 或 Class，我们就给它加一个临时 ID
-                if (!select.id) select.id = 'found-by-script-' + Math.random().toString(36).substr(2, 9);
-                
-                // 获取第二个选项的值
-                let targetValue = '';
-                if (select.options.length > 1) {
-                    targetValue = select.options[1].value;
-                }
-                
-                return { found: true, id: select.id, value: targetValue };
+        console.log(`   [按钮 ${i}] 文字: "${text}" | 可见性: ${isVisible ? '显示' : '隐藏'}`);
+        
+        // 逻辑：如果你原本想点第2个，我们就暂定目标是 index 1
+        // 如果你想点包含特定文字的按钮（比如 "Extend"），请告诉我，我可以改这里
+    }
+
+    // 默认尝试点击第 2 个可见的按钮（对应你之前的 nth-child(2)）
+    // 如果列表里第1个是隐藏的，第2个才是显示的，这里可能需要调整
+    // 这里我们假设你要点列表里的【第2个】（索引为1）
+    if (blueButtons.length >= 2) {
+        targetBtnIndex = 1; 
+    } else {
+        targetBtnIndex = 0; // 如果只有一个，就点第一个
+    }
+
+    console.log(`-> 决定点击 [按钮 ${targetBtnIndex}]...`)
+    
+    // 3. 使用【强力点击】模式 (evaluate click)
+    // 这比 page.click() 更稳，因为它直接在浏览器内部触发点击事件
+    await page.evaluate(el => el.click(), blueButtons[targetBtnIndex]);
+
+    console.log('-> 按钮已点击！等待 3 秒让弹窗出现...')
+    await setTimeout(3000)
+
+    // ==========================================
+    // ▼▼▼ 这里的下拉框代码保持不变 ▼▼▼
+    // ==========================================
+    console.log('4. 正在扫描下拉框...')
+    
+    const found = await page.evaluate(() => {
+        const selects = Array.from(document.querySelectorAll('select'));
+        for (const s of selects) {
+            // 只要包含 svortex 或 1873 就认为是目标
+            if (s.innerHTML.includes('svortex') || s.innerHTML.includes('1873') || s.innerHTML.includes('选择订单')) {
+                 if (!s.id) s.id = 'auto-select-' + Math.random().toString(36).substr(2,9);
+                 let val = '';
+                 // 优先选第2个选项，没有则选第1个
+                 if (s.options.length > 1) val = s.options[1].value;
+                 else if (s.options.length > 0) val = s.options[0].value;
+                 
+                 return { id: s.id, val: val };
             }
         }
-        return { found: false };
+        return null;
     });
 
-    if (targetSelectDetails.found) {
-        console.log(`-> 成功定位到下拉框 (ID: ${targetSelectDetails.id})`)
-        console.log(`-> 目标值: ${targetSelectDetails.value}`)
+    if (found) {
+        console.log(`-> 找到目标下拉框 (ID: ${found.id})，准备选择值: ${found.val}`)
+        await page.select(`select#${found.id}`, found.val)
+        console.log('-> 成功选中订单！')
         
-        if (targetSelectDetails.value) {
-            await page.select(`select#${targetSelectDetails.id}`, targetSelectDetails.value)
-            console.log('-> 下拉框选择成功！')
-        } else {
-            console.error('-> 下拉框找到了，但里面没有足够的选项！')
-        }
+        // 如果选中后还需要点确定按钮，请在这里加代码
+        // await page.click('button.btn-success') 
     } else {
-        console.error('!!! 错误：扫描了整个页面，没有找到包含 "svortex" 或 "1873" 的下拉框。')
-        
-        // --- 调试信息：打印页面结构 ---
-        console.log('--- 页面当前HTML结构 (前1000字符) ---')
-        const bodyHTML = await page.evaluate(() => document.body.innerHTML.substring(0, 1000));
-        console.log(bodyHTML)
-        console.log('-------------------------------------')
-        
-        throw new Error('无法找到目标下拉框，请检查截图 error.png 确认弹窗是否已打开。')
+        console.error('!!! 依然没找到下拉框。这意味着按钮点击后并没有弹出预期的窗口。')
+        throw new Error('Popup did not open')
     }
 
-    console.log('脚本执行完毕')
+    console.log('脚本流程结束')
 
 } catch (e) {
     console.error('发生错误:', e)
